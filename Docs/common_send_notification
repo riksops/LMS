@@ -1,0 +1,67 @@
+name: Send Workflow Notification
+
+on:
+  workflow_call:
+    secrets:
+      JB_RN_SLACK_BOT_TOKEN:
+        required: true
+        description: "Slack Bot Token. Required to send messages to Slack. May be available to your repository by default."
+    inputs:
+      message:
+        description: "Slack Message"
+        required: true
+        type: string
+      slack_channel_id:
+        description: "Slack Channel ID"
+        required: true
+        type: string
+
+jobs:
+  send-notification:
+    runs-on: [arc-runner-set]
+
+    steps:
+      - name: Post to Slack
+        id: slack-succeeded
+        uses: slackapi/slack-github-action@v1.25.0
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.JB_RN_SLACK_BOT_TOKEN }}
+        with:
+          channel-id: ${{ inputs.slack_channel_id }}
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": ":rocket:  ${{ inputs.message }}:rocket:"
+                  }
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    {
+                      "text": ":airplane: Release Notifications | Executed by ${{ github.actor }}",
+                      "type": "mrkdwn"
+                    }
+                  ]
+                },
+                {
+                  "type": "divider"
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Repo:* <${{ github.server_url }}/${{ github.repository }}>"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Action:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|${{ github.run_id }}>"
+                    }
+                  ]
+                }
+              ]
+            }

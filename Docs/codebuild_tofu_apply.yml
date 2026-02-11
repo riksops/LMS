@@ -1,0 +1,45 @@
+name: TF Apply Deployment
+on:
+  workflow_call:
+    inputs:
+        environment:
+          type: string
+          description: |
+            The directory under environments/ where .tf[vars] resides, which should
+            also be the alias of the AWS Account being deployed to.
+          required: true
+        tf_log:
+            type: string
+            description: The log level you want terraform to run with
+            default: ERROR
+    secrets:
+      JB_ACTIONS_PRIVATE_KEY:
+        required: true
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+env:
+  TF_DATA_DIR: ${{ github.workspace }}/.terraform
+  TF_LOG: ${{ inputs.tf_log }}
+jobs:
+  apply:
+    name: TF Apply
+    runs-on: codebuild-${{ inputs.environment }}-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+    environment: apply-${{ inputs.environment }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: environments/${{ inputs.working-directory }}
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+      - id: generate_token
+        uses: jetblueairways/github-workflows/.github/actions/jb-configure-git@main
+        with:
+          private-key: ${{ secrets.JB_ACTIONS_PRIVATE_KEY }}
+      - id: apply
+        name: TF Apply
+        uses: jetblueairways/github-workflows/.github/actions/tofu-apply@main
+        with:
+          environment: ${{ inputs.environment }}

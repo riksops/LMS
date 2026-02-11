@@ -1,0 +1,71 @@
+name: Validate Build
+
+on:
+  workflow_call:
+    inputs:
+      upload_build:
+        description: "If build should be uploaded as an artifact"
+        type: string
+        default: "false"
+
+jobs:
+  build-and-test:
+    runs-on: [arc-runner-set]
+    outputs:
+      coverage: ${{ steps.coverage_check.outputs.coverage }}
+    steps:
+      - name: checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: "18.16"
+          cache: npm
+
+      - name: Set npm config to JetBlue private repos
+        run: |
+          npm config set registry https://${{ vars.JB_ARTIFACTORY_URL }}/artifactory/api/npm/nodejs-virtual
+          npm config set @cb-libraries:registry https://${{ vars.JB_ARTIFACTORY_URL }}/artifactory/api/npm/cb-libraries
+          auth=$(echo -n '${{ secrets.JB_ARTIFACTORY_USER }}:${{ secrets.JB_ARTIFACTORY_SECRET }}' | base64)
+          npm config set //${{ vars.JB_ARTIFACTORY_URL }}/artifactory/api/npm/:_auth=$auth
+
+      - name: install dependencies
+        run: |
+          npm ci
+          rm ${HOME}/.npmrc
+
+      - name: check for lint errors
+        run: npm run lint --if-present
+
+      - name: build application
+        run: npm run build --if-present
+
+      - name: run unit tests for applications with coverage
+        run: npm run test:cov --if-present
+
+      - name: run e2e tests for applications
+        run: npm run test:e2e --if-present
+
+      - name: output coverage status
+        id: coverage_check
+        if: ${{ hashFiles('coverage/') != '' }}
+        run: echo "coverage=true" >> "$GITHUB_OUTPUT"
+
+      - name: upload coverage results
+        uses: actions/upload-artifact@v4
+        if: ${{ steps.coverage_check.outputs.coverage == 'true' }}
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 1
+
+      - name: upload build
+        uses: actions/upload-artifact@v4
+        if: ${{ inputs.upload_build == 'true' }}
+        with:
+          name: dist
+          path: dist/
+          retention-days: 1

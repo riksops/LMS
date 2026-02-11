@@ -1,0 +1,155 @@
+name: lib-build-pipeline
+
+on:
+  workflow_call:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: "${{ github.repository }}-libs"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    outputs:
+      libarray: ${{steps.extracting-libnames.outputs.libraries}}
+    runs-on: [dind-runner-set]
+    steps:
+      - name: checkout code
+        uses: jetblueairways/foundation-gh-action-checkout@v3.2.0
+        with:
+          fetch-depth: 0
+
+      - name: setup node environment
+        uses: jetblueairways/foundation-gh-action-setup-node@v3.4.1
+        with:
+          node-version: 20.14.0
+          cache: npm
+
+      - name: Set npm config to JetBlue private repos
+        run: |
+          npm config set registry https://${{ vars.JB_ARTIFACTORY_URL }}/artifactory/api/npm/nodejs-virtual
+          npm config set @cb-libraries:registry https://${{ vars.JB_ARTIFACTORY_URL }}/artifactory/api/npm/cb-libraries
+          auth=$(echo -n '${{ secrets.JB_ARTIFACTORY_USER }}:${{ secrets.JB_ARTIFACTORY_SECRET }}' | base64)
+          npm config set //${{ vars.JB_ARTIFACTORY_URL }}/artifactory/api/npm/:_auth=$auth
+
+      - name: install dependencies
+        run: |
+          npm ci
+          rm ${HOME}/.npmrc
+
+      - name: check for lint errors
+        run: npm run lint
+
+      - name: build application
+        run: npm run build
+
+      - name: Run unit tests for applications with coverage
+        run: npm run test:cov
+
+      - name: Upload code coverage results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.repository.name }}-code-coverage-report-${{ github.sha }}
+          path: coverage
+          retention-days: 7
+
+      - name: Get the library names
+        id: library-names
+        uses: jetblueairways/foundation-tj-changed-files-action@v39.2.0
+        with:
+          dir_names: "true"
+          dir_names_max_depth: 2
+          dir_names_exclude_current_dir: true
+          files_ignore: |
+            .github/**
+            .jfrog/**
+            tools/**
+            libs/cb-test-lib/**
+            sample-project/**
+
+      - name: List all changed dir names with directory names
+        if: ${{ steps.library-names.outputs.all_modified_files !='' }}
+        run: |
+          echo '${{ steps.library-names.outputs.all_modified_files }}' | tr " " "\n" >directories.txt
+
+      - name: Extracting the directory names
+        if: ${{ steps.library-names.outputs.all_modified_files !='' }}
+        id: extracting-libnames
+        run: |
+          #!/usr/bin/bash
+          libs=()
+          while IFS= read -r val; do
+             libs+=(\""$(basename $val)"\")
+          done<directories.txt
+          echo libraries=$(IFS=,; printf '[%s]' "${libs[*]}") >> $GITHUB_OUTPUT
+
+  sonar-scan:
+    needs: [build]
+    if: ${{needs.build.outputs.libarray !=''}}
+    uses: ./.github/workflows/lib-sonar-scan.yml
+    with:
+      libraryname: ${{ matrix.libnames }}
+    secrets: inherit
+    strategy:
+      matrix:
+        libnames: ${{fromJSON(needs.build.outputs.libarray)}}
+      max-parallel: 2
+
+  package:
+    needs: [build, sonar-scan]
+    runs-on: [dind-runner-set]
+    steps:
+      - name: Generate token
+        uses: actions/create-github-app-token@v1
+        id: generate_token
+        with:
+          app-id: ${{ vars.JB_ACTIONS_APP_ID }}
+          private-key: ${{ secrets.JB_ACTIONS_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: checkout code
+        uses: jetblueairways/foundation-gh-action-checkout@v3.2.0
+        with:
+          fetch-depth: 0
+          token: ${{ steps.generate_token.outputs.token }}
+
+      - name: setup node environment
+        uses: jetblueairways/foundation-gh-action-setup-node@v3.4.1
+        with:
+          node-version: 20.14.0
+          cache: npm
+
+      - name: Set npm config to JetBlue private repos
+        run: |
+          npm config set registry https://${{ vars.JB_ARTIFACTORY_URL }}/artifactory/api/npm/nodejs-virtual
+          npm config set @cb-libraries:registry https://${{ vars.JB_ARTIFACTORY_URL }}/artifactory/api/npm/cb-libraries
+          auth=$(echo -n '${{ secrets.JB_ARTIFACTORY_USER }}:${{ secrets.JB_ARTIFACTORY_SECRET }}' | base64)
+          npm config set //${{ vars.JB_ARTIFACTORY_URL }}/artifactory/api/npm/:_auth=$auth
+
+      - name: install dependencies
+        run: |
+          npm ci
+          rm ${HOME}/.npmrc
+
+      - name: setup jfrog cli
+        uses: jetblueairways/foundation-setup-jfrog-cli-action@v3.4.1
+        env:
+          JF_URL: https://${{ vars.JB_ARTIFACTORY_URL }}
+          JF_USER: ${{ secrets.JB_ARTIFACTORY_USER }}
+          JF_PASSWORD: ${{ secrets.JB_ARTIFACTORY_SECRET }}
+
+      - name: Adding the JetBlue artifactory for publishing
+        run: |
+          jf c add jb-artifactory --url=https://${{ vars.JB_ARTIFACTORY_URL }}
+
+      - name: check affected applications and create release
+        run: npm run release
+
+      - name: commit after creating release
+        uses: jetblueairways/foundation-git-auto-commit-action@v5
+        with:
+          commit_message: '[skip ci] updating release versions'
+          file_pattern: '*.json'
+          disable_globbing: true

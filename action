@@ -1,0 +1,142 @@
+name: TF Plan
+author: Sean Summers <ssummers@jetblue.com>
+description: |
+  Plan a TF managed Deployment, using an opinionated structure with
+  an environments/{environment}/ folder containing all needed .tf{vars}
+  files for an environment.
+inputs:
+  environment:
+    description: The folder in environments/ (should also match AWS Account alias)
+    required: true
+outputs:
+  artifact-name:
+    description: Artifact Name
+    value: ${{ inputs.deployment-name }}
+  artifact-id:
+    description: Artifact ID
+    value: ${{ steps.tf-plan-and-backend-artifact.outputs.artifact-id }}
+  artifact-URL:
+    description: Artifact URL
+    value: ${{ steps.tf-plan-and-backend-artifact.outputs.artifact-url }}
+  artifact-digest:
+    description: Artifact digest
+    value: ${{ steps.tf-plan-and-backend-artifact.outputs.artifact-digest }}
+runs:
+  using: composite
+  steps:
+    - name: Setup OpenTofu
+      uses: opentofu/setup-opentofu@v1
+      with:
+        tofu_version: 1.10.5
+        tofu_version_file: .opentofu-version
+    - name: Validate TF Formatting
+      id: fmt
+      run: tofu fmt
+      shell: bash
+      working-directory: environments/${{ inputs.environment }}
+      env:
+        TF_IN_AUTOMATION: "1"
+        TF_INPUT: "0"
+        TF_CLI_ARGS: -no-color
+        TF_CLI_ARGS_fmt: -check -recursive
+    - name: Initialize TF
+      id: init
+      run: tofu init
+      shell: bash
+      working-directory: environments/${{ inputs.environment }}
+      env:
+        TF_IN_AUTOMATION: "1"
+        TF_INPUT: "0"
+        TF_CLI_ARGS: -no-color
+        TF_CLI_ARGS_init: -reconfigure -lockfile=readonly
+    - name: Validate TF
+      id: validate
+      run: tofu validate
+      shell: bash
+      working-directory: environments/${{ inputs.environment }}
+      env:
+        TF_IN_AUTOMATION: "1"
+        TF_INPUT: "0"
+        TF_CLI_ARGS: -no-color
+    - name: Plan TF
+      id: plan
+      run: tofu plan
+      shell: bash
+      working-directory: environments/${{ inputs.environment }}
+      env:
+        TF_IN_AUTOMATION: "1"
+        TF_INPUT: "0"
+        TF_CLI_ARGS: -no-color
+        TF_CLI_ARGS_plan: -concise -out=tfplan
+    - name: Create the plan summary
+      uses: actions/github-script@v7
+      if: github.event_name == 'pull_request'
+      env:
+        PLAN: |
+          tofu
+          ${{ steps.plan.outputs.stdout }}
+      with:
+        result-encoding: string
+        script: |
+          // 1. Retrieve existing bot comments for the PR
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          })
+          const botComment = comments.find(comment => {
+            return comment.user.type === 'Bot' && comment.body.includes('OpenTofu Format and Style (${{ inputs.environment }})')
+          })
+
+          // 2. Prepare format of the comment
+          const output = `#### OpenTofu Format and Style (${{ inputs.environment }}) 🖌\`${{ steps.fmt.outcome }}\`
+          #### OpenTofu Initialization ⚙️\`${{ steps.init.outcome }}\`
+          #### OpenTofu Validation 🤖\`${{ steps.validate.outcome }}\`
+          <details><summary>Validation Output</summary>
+
+          \`\`\`\n
+          ${{ steps.validate.outputs.stdout }}
+          \`\`\`
+
+          </details>
+
+          #### OpenTofu Plan 📖\`${{ steps.plan.outcome }}\`
+
+          <details><summary>Show Plan</summary>
+
+          \`\`\`\n
+          ${process.env.PLAN}
+          \`\`\`
+
+          </details>
+
+          *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Working Directory: \`environments/${{ inputs.environment }}\`, Workflow: \`${{ github.workflow }}\`*`;
+
+          // 3. If we have a comment, update it, otherwise create a new one
+          if (botComment) {
+            github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: botComment.id,
+              body: output
+            })
+          } else {
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+          }
+    - name: Copy TF Plan to Workspace
+      run: cp -u tfplan ${{ github.workspace }}/ || true
+      shell: bash
+      working-directory: environments/${{ inputs.environment }}
+    - name: Upload TF Plan and Backend Artifact
+      id: tf-plan-and-backend-artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.environment }}
+        path: |
+          tfplan
+          .terraform/terraform.tfstate

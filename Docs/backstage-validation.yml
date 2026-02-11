@@ -1,0 +1,27 @@
+name: Validate Oculus(Backstage) Integration
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-catalog-file:
+    runs-on: arc-runner-set
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # Check if the required Oculus(Backstage) file exists
+      - name: Check for catalog file
+        run: |
+          if [ ! -f "./catalog-info.yaml" ]; then
+            echo "❌ Oculus(Backstage) Integration is missing."
+          else
+            echo "✅ Oculus(Backstage) integration exists."
+          fi
+        continue-on-error: true  # 👈 Prevents failure
+
+      - name: Mark job as successful
+        run: echo "Completed (non-blocking)"

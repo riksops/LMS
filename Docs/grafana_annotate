@@ -1,0 +1,49 @@
+name: annotate-deployment
+on:
+  workflow_call:
+    inputs:
+      product:
+        type: string
+        description: "The name of Product this service is for"
+        required: true
+      service_name:
+        type: string
+        description: "The service invoking deployment"
+        required: true
+      version:
+        type: string
+        description: "The service version being deployed"
+        required: true
+      target:
+        type: string
+        description: "The target being deployed"
+        required: true
+      environment:
+          type: string
+          description: "The service environment to which deployed"
+          required: true
+      region:
+          type: string
+          description: "The region being deployed to"
+          required: true
+    secrets:
+      GRAFANA_API_TOKEN:
+        required: true
+
+jobs:
+  annotate:
+    runs-on: [arc-runner-set]
+    steps:
+      - name: Add Grafana annotation
+        uses: hexionas/grafana-annotation-action@v0
+        with:
+          grafanaHost: https://argus.jetblue.com
+          grafanaToken: ${{ secrets.GRAFANA_API_TOKEN }}
+          grafanaText: Deployment of ${{ inputs.service_name }} Version ${{ inputs.version }}
+          grafanaTags: |
+            service:${{ inputs.service_name }}
+            version:${{ inputs.version }}
+            product:${{ inputs.product }}
+            environment:${{ inputs.environment }}
+            target:${{ inputs.target }}
+            region:${{ inputs.region }}

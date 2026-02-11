@@ -1,0 +1,52 @@
+name: Test Code Quality
+
+on:
+  workflow_call:
+    secrets:
+      JB_SONARQUBE_TOKEN:
+        required: true
+      JB_SONARQUBE_URL:
+        required: true
+
+jobs:
+  code-quality:
+    runs-on: [dind-runner-set]
+
+    steps:
+      - name: checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage
+          path: ./coverage
+
+      - name: Install missing dependencies
+        run: |
+          sudo apt-get -y update
+          sudo apt-get -y install curl jq
+
+      - name: run sonarqube scan
+        uses: jetblueairways/foundation-sonarqube-scan-action@v4.2.1
+        env:
+          SONAR_TOKEN: ${{ secrets.JB_SONARQUBE_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.JB_SONARQUBE_URL }}
+        with:
+          args: >
+            -Dsonar.branch.name=${{ github.ref_name }}
+
+      - name: changing project from default to foundation quality gate
+        run: curl -u '${{ secrets.JB_SONARQUBE_TOKEN }}:' -X POST "${{ vars.JB_SONARQUBE_URL }}/api/qualitygates/select?gateName=Foundation&projectKey=${{ github.event.repository.name }}"
+
+      - name: changing project from default to foundation quality profile
+        run: curl -u '${{ secrets.JB_SONARQUBE_TOKEN }}:' -X POST "${{ vars.JB_SONARQUBE_URL }}/api/qualityprofiles/add_project?language=ts&project=${{ github.event.repository.name }}&qualityProfile=Foundation"
+
+      - name: sonarqube quality gate check
+        id: sonarqube-quality-gate-check
+        uses: jetblueairways/foundation-sonarqube-quality-gate-action@v1.1.0
+        timeout-minutes: 2
+        env:
+          SONAR_TOKEN: ${{ secrets.JB_SONARQUBE_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.JB_SONARQUBE_URL }}

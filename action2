@@ -1,0 +1,29 @@
+name: JB configure git for organization access
+author: Sean Summers <ssummers@jetblue.com>
+description: Set up the git for JB success
+inputs:
+  app-id:
+    description: GitHub App ID
+    default: "965107"
+  private-key:
+    description: Private Key for GitHub App
+    required: true
+outputs:
+  token:
+    description: GitHub Token
+    value: ${{ steps.generate_token.outputs.token }}
+runs:
+  using: composite
+  steps:
+    - name: Generate token
+      uses: actions/create-github-app-token@v1
+      id: generate_token
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        owner: ${{ github.repository_owner }}
+    - name: configure git
+      run: git config --global url.https://oauth2:$GH_TOKEN@github.com.insteadOf ssh://git@github.com
+      env:
+        GH_TOKEN: ${{ steps.generate_token.outputs.token }}
+      shell: bash

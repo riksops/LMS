@@ -1,0 +1,166 @@
+name: Block PR on critical Dependabot alerts
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  security-events: read
+  pull-requests: write
+
+jobs:
+  check-critical-dependabot-alerts:
+    runs-on: arc-runner-set
+
+    steps:
+      - name: Generate token
+        uses: actions/create-github-app-token@v1
+        id: generate_token
+        with:
+          app-id: 2330214
+          private-key: ${{ secrets.GHA_SECURITY_KEY }}
+          owner: ${{ github.repository_owner }}
+  
+      - name: Check for existing comment
+        id: find-comment
+        env:
+          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          echo "Looking for existing comment on PR #$PR_NUMBER..."
+          
+          comments=$(curl -sS \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$OWNER/$REPO/issues/$PR_NUMBER/comments")
+          
+          # Look for comment that contains our identifier
+          comment_id=$(echo "$comments" | jq -r '.[] | select(.body | contains("<!-- dependabot-critical-alerts-comment -->")) | .id' | head -n1)
+          
+          if [ -n "$comment_id" ] && [ "$comment_id" != "null" ]; then
+            echo "Found existing comment with ID: $comment_id"
+            echo "comment_id=$comment_id" >> $GITHUB_OUTPUT
+            echo "comment_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "No existing comment found"
+            echo "comment_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check for open critical Dependabot alerts
+        id: check-alerts
+        env:
+          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          echo "Checking Dependabot alerts for $OWNER/$REPO..."
+
+          alerts=$(curl -sS \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$OWNER/$REPO/dependabot/alerts?state=open&severity=critical")
+
+          count=$(printf '%s\n' "$alerts" | jq 'length')
+          echo "Open critical Dependabot alerts: $count"
+          echo "alert_count=$count" >> $GITHUB_OUTPUT
+
+          if [ "$count" -gt 0 ]; then
+            echo "❌ Found $count open CRITICAL Dependabot alerts."
+            # Format alert details for comment
+            alert_details=$(printf '%s\n' "$alerts" | jq -r '.[] | "- **Alert [#\(.number)](../security/dependabot/\(.number))**: \(.security_advisory.summary) (\(.security_advisory.severity | ascii_upcase))"' | head -10)
+            # Create comment body
+            comment_header="<!-- dependabot-critical-alerts-comment -->"
+            comment_title="## 🚨 Critical Dependabot Security Alerts Found"
+            comment_desc="This PR is being blocked because there are **CRITICAL** Dependabot security alerts in this repository that need to be addressed."
+            comment_alerts="### Critical Alerts:"
+            comment_actions="### What you need to do:"
+            comment_list="1. 🔍 Review the [Dependabot alerts](/../security/dependabot) in this repository"
+            comment_list2="2. 🛠️ Address all **critical** severity alerts by updating dependencies or applying patches"
+            comment_list3="3. ✅ Once resolved, this check will automatically pass on the next push"
+            comment_why="### Why this matters:"
+            comment_reason="Critical security vulnerabilities pose significant risks and should be resolved before merging new code."
+            comment_footer="---"
+            comment_update="_This comment is automatically updated each time the workflow runs._"
+            
+            # Build complete comment body
+            comment_body="$comment_header"$'\n'"$comment_title"$'\n\n'"$comment_desc"$'\n\n'"$comment_alerts"$'\n'"$alert_details"
+            
+            if [ "$count" -gt 10 ]; then
+              comment_body="$comment_body"$'\n\n'"_... and $((count - 10)) more critical alerts._"
+            fi
+            
+            comment_body="$comment_body"$'\n\n'"$comment_actions"$'\n'"$comment_list"$'\n'"$comment_list2"$'\n'"$comment_list3"$'\n\n'"$comment_why"$'\n'"$comment_reason"$'\n\n'"$comment_footer"$'\n'"$comment_update"
+            
+            echo "has_critical_alerts=true" >> $GITHUB_OUTPUT
+            echo "comment_body<<COMMENT_EOF" >> $GITHUB_OUTPUT
+            echo "$comment_body" >> $GITHUB_OUTPUT
+            echo "COMMENT_EOF" >> $GITHUB_OUTPUT
+            
+          else
+            echo "✅ No open critical Dependabot alerts. Proceeding."
+            echo "has_critical_alerts=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create PR comment for critical alerts
+        if: steps.check-alerts.outputs.has_critical_alerts == 'true' && steps.find-comment.outputs.comment_exists == 'false'
+        env:
+          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          COMMENT_BODY: ${{ steps.check-alerts.outputs.comment_body }}
+        run: |
+          echo "Creating new comment on PR #$PR_NUMBER..."
+          
+          curl -sS \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$OWNER/$REPO/issues/$PR_NUMBER/comments" \
+            -d "{\"body\":$(echo "$COMMENT_BODY" | jq -Rs .)}" \
+            > /dev/null
+          
+          echo "✅ Comment created successfully"
+
+      - name: Update existing PR comment for critical alerts
+        if: steps.check-alerts.outputs.has_critical_alerts == 'true' && steps.find-comment.outputs.comment_exists == 'true'
+        env:
+          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          COMMENT_ID: ${{ steps.find-comment.outputs.comment_id }}
+          COMMENT_BODY: ${{ steps.check-alerts.outputs.comment_body }}
+        run: |
+          echo "Updating existing comment ID: $COMMENT_ID..."
+          
+          curl -sS \
+            -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$OWNER/$REPO/issues/comments/$COMMENT_ID" \
+            -d "{\"body\":$(echo "$COMMENT_BODY" | jq -Rs .)}" \
+            > /dev/null
+          
+          echo "✅ Comment updated successfully"
+
+      - name: Remove comment when no critical alerts
+        if: steps.check-alerts.outputs.has_critical_alerts == 'false' && steps.find-comment.outputs.comment_exists == 'true'
+        env:
+          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          COMMENT_ID: ${{ steps.find-comment.outputs.comment_id }}
+        run: |
+          echo "No critical alerts found. Removing existing comment ID: $COMMENT_ID..."
+          
+          curl -sS \
+            -X DELETE \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$OWNER/$REPO/issues/comments/$COMMENT_ID" \
+            > /dev/null
+          
+          echo "✅ Comment removed successfully"

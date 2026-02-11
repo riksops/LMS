@@ -1,0 +1,66 @@
+name: Release Tags
+
+on:
+  workflow_call:
+    inputs:
+        environment:
+          type: string
+          description: "Environment to deploy to"
+          default: "dev"
+        runs_on:
+          type: string
+          description: The runner group label to use for the actions
+          default: "arc-runner-set"
+        bucket_name:
+          type: string
+          description: "Bucket name where semantic release configurations are stored"
+          default: "jb-s3-tf-state-ccaas-sbx-eus1"
+    secrets:
+      JB_ACTIONS_PRIVATE_KEY:
+          required: true
+      AWS_ASSUME_ROLE:
+        required: true
+      AWS_ACCOUNT_NUMBER:
+        required: true
+
+permissions:
+  id-token: write
+  contents: write
+  issues: write
+
+jobs:
+    release-tags:
+        runs-on: ${{ inputs.runs_on }}
+        environment: ${{ inputs.environment }}
+
+        steps:
+        - name: Install AWS CLI
+          run: |
+            sudo apt-get update && sudo apt install -y python3-pip && sudo apt-get install -y jq awscli git
+            sudo apt-get install --only-upgrade awscli && pip3 install --upgrade awscli && aws --version
+        - name: Checkout code
+          uses: actions/checkout@v3
+
+        - name: Set up Node.js
+          uses: actions/setup-node@v3
+          with:
+            node-version: "20"
+
+        - name: Install dependencies
+          run: npm install --save-dev semantic-release @semantic-release/changelog @semantic-release/git @semantic-release/github
+
+        - name: Generate token
+          uses: actions/create-github-app-token@v1
+          id: generate_token
+          with:
+            app-id: 965107
+            private-key: ${{ secrets.JB_ACTIONS_PRIVATE_KEY }}
+            owner: ${{ github.repository_owner }}
+            repository: ${{ github.event.repository.name }}
+
+        - name: Release Tag
+          env:
+            GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
+          run: |
+            aws s3 sync s3://${{ inputs.bucket_name }}/sementic-release/ .
+            npx semantic-release

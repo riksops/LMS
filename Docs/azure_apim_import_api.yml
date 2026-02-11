@@ -1,0 +1,421 @@
+name: Import API to Azure API Management
+run-name: Import API to ${{ inputs.environment }} APIM
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        description: "Environment to deploy to"
+        default: "non_production"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  import-api:
+    name: Import API to APIM
+    runs-on: "dind-runner-set"
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Set Configuration Path
+        id: set_config_path
+        run: |
+          CONFIG_FILE_PATH="configuration/${{ inputs.environment }}/app-config.yaml"
+          echo "config_file_path=$CONFIG_FILE_PATH" >> $GITHUB_OUTPUT
+          echo "Configuration file path set to: $CONFIG_FILE_PATH"
+
+      - name: Parse API Configuration
+        id: parse_config
+        run: |
+          CONFIG_FILE_PATH="${{ steps.set_config_path.outputs.config_file_path }}"
+          echo "Parsing API configuration from $CONFIG_FILE_PATH"
+          
+          if [ ! -f "$CONFIG_FILE_PATH" ]; then
+            echo "ERROR: Configuration file '$CONFIG_FILE_PATH' not found"
+            exit 1
+          fi
+          
+          # Extract API configuration values using yq
+          API_ID=$(yq '.api_specification.id' "$CONFIG_FILE_PATH")
+          API_NAME=$(yq '.api_specification.name' "$CONFIG_FILE_PATH")
+          API_PATH=$(yq '.api_specification.path' "$CONFIG_FILE_PATH")
+          API_TYPE=$(yq '.api_specification.type' "$CONFIG_FILE_PATH")
+          SPECIFICATION_URL=$(yq '.api_specification.specification_url' "$CONFIG_FILE_PATH")
+          SPECIFICATION_FORMAT=$(yq '.api_specification.specification_format' "$CONFIG_FILE_PATH")
+          API_VERSION=$(yq '.api_specification.version' "$CONFIG_FILE_PATH")
+          VERSIONING_SCHEME=$(yq '.api_specification.versioning_scheme' "$CONFIG_FILE_PATH")
+          SERVICE_URL=$(yq '.api_specification.service_url' "$CONFIG_FILE_PATH")
+          APIM_SERVICE_NAMES=$(yq '.api_specification.apim_service_name' "$CONFIG_FILE_PATH")
+          RESOURCE_GROUPS=$(yq '.api_specification.resource_group' "$CONFIG_FILE_PATH")
+
+          # Remove quotes if present
+          API_ID=$(echo "$API_ID" | sed 's/^"//;s/"$//')
+          API_NAME=$(echo "$API_NAME" | sed 's/^"//;s/"$//')
+          API_PATH=$(echo "$API_PATH" | sed 's/^"//;s/"$//')
+          API_TYPE=$(echo "$API_TYPE" | sed 's/^"//;s/"$//')
+          SPECIFICATION_URL=$(echo "$SPECIFICATION_URL" | sed 's/^"//;s/"$//')
+          SPECIFICATION_FORMAT=$(echo "$SPECIFICATION_FORMAT" | sed 's/^"//;s/"$//')
+          API_VERSION=$(echo "$API_VERSION" | sed 's/^"//;s/"$//')
+          VERSIONING_SCHEME=$(echo "$VERSIONING_SCHEME" | sed 's/^"//;s/"$//')
+          SERVICE_URL=$(echo "$SERVICE_URL" | sed 's/^"//;s/"$//')
+          APIM_SERVICE_NAMES=$(echo "$APIM_SERVICE_NAMES" | sed 's/^"//;s/"$//')
+          RESOURCE_GROUPS=$(echo "$RESOURCE_GROUPS" | sed 's/^"//;s/"$//')
+
+          # Validate required values
+          if [ "$API_ID" = "null" ] || [ -z "$API_ID" ]; then
+            echo "ERROR: api_specification.id is required"
+            exit 1
+          fi
+          
+          if [ "$SPECIFICATION_URL" = "null" ] || [ -z "$SPECIFICATION_URL" ]; then
+            echo "ERROR: api_specification.specification_url is required"
+            exit 1
+          fi
+          
+          # Validate that APIM service names and resource groups are provided
+          if [ "$APIM_SERVICE_NAMES" = "null" ] || [ -z "$APIM_SERVICE_NAMES" ]; then
+            echo "ERROR: api_specification.apim_service_name is required"
+            exit 1
+          fi
+          
+          if [ "$RESOURCE_GROUPS" = "null" ] || [ -z "$RESOURCE_GROUPS" ]; then
+            echo "ERROR: api_specification.resource_group is required"
+            exit 1
+          fi
+          
+          # Convert comma-separated values to arrays
+          IFS=',' read -ra APIM_ARRAY <<< "$APIM_SERVICE_NAMES"
+          IFS=',' read -ra RG_ARRAY <<< "$RESOURCE_GROUPS"
+          
+          # Trim whitespace from array elements
+          for i in "${!APIM_ARRAY[@]}"; do
+            APIM_ARRAY[$i]=$(echo "${APIM_ARRAY[$i]}" | xargs)
+          done
+          
+          for i in "${!RG_ARRAY[@]}"; do
+            RG_ARRAY[$i]=$(echo "${RG_ARRAY[$i]}" | xargs)
+          done
+          
+          # Validate array lengths match
+          if [ ${#APIM_ARRAY[@]} -ne ${#RG_ARRAY[@]} ]; then
+            echo "ERROR: Number of APIM service names (${#APIM_ARRAY[@]}) does not match number of resource groups (${#RG_ARRAY[@]})"
+            exit 1
+          fi
+          
+          # Create JSON array of APIM instances
+          APIM_INSTANCES="["
+          for i in "${!APIM_ARRAY[@]}"; do
+            if [ $i -gt 0 ]; then
+              APIM_INSTANCES+=","
+            fi
+            APIM_INSTANCES+="{\"apim_service_name\":\"${APIM_ARRAY[$i]}\",\"resource_group\":\"${RG_ARRAY[$i]}\"}"
+          done
+          APIM_INSTANCES+="]"
+          
+          # Set outputs for use in subsequent steps
+          echo "api_id=$API_ID" >> $GITHUB_OUTPUT
+          echo "api_name=$API_NAME" >> $GITHUB_OUTPUT
+          echo "api_path=$API_PATH" >> $GITHUB_OUTPUT
+          echo "api_type=$API_TYPE" >> $GITHUB_OUTPUT
+          echo "specification_url=$SPECIFICATION_URL" >> $GITHUB_OUTPUT
+          echo "specification_format=$SPECIFICATION_FORMAT" >> $GITHUB_OUTPUT
+          echo "api_version=$API_VERSION" >> $GITHUB_OUTPUT
+          echo "versioning_scheme=$VERSIONING_SCHEME" >> $GITHUB_OUTPUT
+          echo "service_url=$SERVICE_URL" >> $GITHUB_OUTPUT
+          echo "apim_instances=$APIM_INSTANCES" >> $GITHUB_OUTPUT
+          echo "apim_count=${#APIM_ARRAY[@]}" >> $GITHUB_OUTPUT
+
+          echo "Parsed API Configuration:"
+          echo "- ID: $API_ID"
+          echo "- Name: $API_NAME"
+          echo "- Path: $API_PATH"
+          echo "- Type: $API_TYPE"
+          echo "- Specification URL: $SPECIFICATION_URL"
+          echo "- Specification Format: $SPECIFICATION_FORMAT"
+          echo "- Version: $API_VERSION"
+          echo "- Versioning Scheme: $VERSIONING_SCHEME"
+          echo "- Service URL: $SERVICE_URL"
+          echo "- APIM Instances Count: ${#APIM_ARRAY[@]}"
+          echo "- APIM Instances: $APIM_INSTANCES"
+
+      - name: Generate token
+        uses: actions/create-github-app-token@v2
+        id: generate_token
+        with:
+          app-id: ${{ vars.JB_ACTIONS_APP_ID }}
+          private-key: ${{ secrets.JB_ACTIONS_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Log in to Azure using OIDC
+        uses: azure/login@v2.3.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+
+      - name: Validate APIM Services
+        id: validate_apim
+        run: |
+          echo "Validating APIM services exist..."
+          
+          APIM_INSTANCES='${{ steps.parse_config.outputs.apim_instances }}'
+          
+          # Parse JSON array and validate each APIM instance
+          echo "$APIM_INSTANCES" | jq -c '.[]' | while read -r instance; do
+            apim_name=$(echo "$instance" | jq -r '.apim_service_name')
+            rg_name=$(echo "$instance" | jq -r '.resource_group')
+            
+            echo "Validating APIM service '$apim_name' in resource group '$rg_name'..."
+            
+            apim_exists=$(az apim show --name "$apim_name" --resource-group "$rg_name" --query "name" -o tsv 2>/dev/null || echo "")
+            
+            if [ -z "$apim_exists" ]; then
+              echo "ERROR: APIM service '$apim_name' not found in resource group '$rg_name'"
+              exit 1
+            fi
+            
+            echo "✓ APIM service '$apim_name' validated successfully"
+          done
+          
+          echo "All APIM services validated successfully"
+
+      - name: Download API Specification
+        id: download_spec
+        run: |
+          echo "Downloading API specification from ${{ steps.parse_config.outputs.specification_url }}"
+          
+          # Create temp directory for specification
+          mkdir -p /tmp/api-specs
+          
+          # Download specification file
+          if curl -f -L -o "/tmp/api-specs/spec.json" "${{ steps.parse_config.outputs.specification_url }}"; then
+            echo "API specification downloaded successfully"
+            echo "spec_file=/tmp/api-specs/spec.json" >> $GITHUB_OUTPUT
+          else
+            echo "ERROR: Failed to download API specification from ${{ steps.parse_config.outputs.specification_url }}"
+            exit 1
+          fi
+
+      - name: Validate API Specification
+        id: validate_spec
+        run: |
+          echo "Validating API specification format..."
+          
+          # Basic JSON validation for OpenAPI specs
+          if [[ "${{ steps.parse_config.outputs.specification_format }}" == "OpenApiJson" ]] || [[ "${{ steps.parse_config.outputs.specification_format }}" == "OpenApi" ]]; then
+            if ! jq empty "/tmp/api-specs/spec.json" 2>/dev/null; then
+              echo "ERROR: Invalid JSON in API specification"
+              exit 1
+            fi
+            
+            # Check for basic OpenAPI structure
+            if ! jq -e '.openapi // .swagger' "/tmp/api-specs/spec.json" > /dev/null; then
+              echo "ERROR: API specification does not appear to be valid OpenAPI/Swagger format"
+              exit 1
+            fi
+          fi
+          
+          echo "API specification validated successfully"
+
+      - name: Check if API exists in APIM instances
+        id: check_api
+        run: |
+          echo "Checking if API '${{ steps.parse_config.outputs.api_id }}' exists in APIM instances..."
+          
+          APIM_INSTANCES='${{ steps.parse_config.outputs.apim_instances }}'
+          
+          # Parse JSON array and check each APIM instance
+          echo "$APIM_INSTANCES" | jq -c '.[]' | while read -r instance; do
+            apim_name=$(echo "$instance" | jq -r '.apim_service_name')
+            rg_name=$(echo "$instance" | jq -r '.resource_group')
+            
+            api_exists=$(az apim api show \
+              --service-name "$apim_name" \
+              --resource-group "$rg_name" \
+              --api-id "${{ steps.parse_config.outputs.api_id }}" \
+              --query "name" -o tsv 2>/dev/null || echo "")
+            
+            if [ -n "$api_exists" ]; then
+              echo "✓ API exists in '$apim_name', will update existing API"
+            else
+              echo "✓ API does not exist in '$apim_name', will create new API"
+            fi
+          done
+
+      - name: Import/Update API in APIM instances
+        id: import_api
+        run: |
+          echo "Importing/updating API '${{ steps.parse_config.outputs.api_id }}' in all APIM instances..."
+          
+          APIM_INSTANCES='${{ steps.parse_config.outputs.apim_instances }}'
+          
+          # Construct versioning parameters
+          versioning_params=""
+          if [[ "${{ steps.parse_config.outputs.versioning_scheme }}" != "" && "${{ steps.parse_config.outputs.api_version }}" != "" ]]; then
+            versioning_params="--api-version ${{ steps.parse_config.outputs.api_version }} --api-version-set-id ${{ steps.parse_config.outputs.api_id }}-versions"
+          fi
+          
+          # Parse JSON array and import to each APIM instance
+          echo "$APIM_INSTANCES" | jq -c '.[]' | while read -r instance; do
+            apim_name=$(echo "$instance" | jq -r '.apim_service_name')
+            rg_name=$(echo "$instance" | jq -r '.resource_group')
+            
+            echo ""
+            echo "Importing API to APIM service '$apim_name' in resource group '$rg_name'..."
+            
+            # Import or update the API
+            az apim api import \
+              --service-name "$apim_name" \
+              --resource-group "$rg_name" \
+              --api-id "${{ steps.parse_config.outputs.api_id }}" \
+              --display-name "${{ steps.parse_config.outputs.api_name }}" \
+              --path "${{ steps.parse_config.outputs.api_path }}" \
+              --specification-format "${{ steps.parse_config.outputs.specification_format }}" \
+              --specification-path "/tmp/api-specs/spec.json" \
+              --service-url "${{ steps.parse_config.outputs.service_url }}" \
+              $versioning_params
+            
+            echo "✓ API import/update completed for '$apim_name'"
+          done
+          
+          echo ""
+          echo "All API imports completed successfully"
+
+      - name: Create API Version Sets (if needed)
+        id: create_version_set
+        if: ${{ steps.parse_config.outputs.versioning_scheme != '' && steps.parse_config.outputs.api_version != '' }}
+        run: |
+          echo "Creating or updating API version sets..."
+          
+          APIM_INSTANCES='${{ steps.parse_config.outputs.apim_instances }}'
+          
+          # Parse JSON array and create version set in each APIM instance
+          echo "$APIM_INSTANCES" | jq -c '.[]' | while read -r instance; do
+            apim_name=$(echo "$instance" | jq -r '.apim_service_name')
+            rg_name=$(echo "$instance" | jq -r '.resource_group')
+            
+            echo ""
+            echo "Checking version set in APIM service '$apim_name'..."
+            
+            # Check if version set exists
+            version_set_exists=$(az apim api versionset show \
+              --service-name "$apim_name" \
+              --resource-group "$rg_name" \
+              --version-set-id "${{ steps.parse_config.outputs.api_id }}-versions" \
+              --query "name" -o tsv 2>/dev/null || echo "")
+            
+            if [ -z "$version_set_exists" ]; then
+              echo "Creating new API version set in '$apim_name'..."
+              az apim api versionset create \
+                --service-name "$apim_name" \
+                --resource-group "$rg_name" \
+                --version-set-id "${{ steps.parse_config.outputs.api_id }}-versions" \
+                --display-name "${{ steps.parse_config.outputs.api_name }} Versions" \
+                --versioning-scheme "${{ steps.parse_config.outputs.versioning_scheme }}"
+              echo "✓ API version set created for '$apim_name'"
+            else
+              echo "✓ API version set already exists in '$apim_name'"
+            fi
+          done
+          
+          echo ""
+          echo "All API version sets processed successfully"
+
+      - name: Verify API Imports
+        id: verify_import
+        run: |
+          echo "Verifying API imports across all APIM instances..."
+          
+          APIM_INSTANCES='${{ steps.parse_config.outputs.apim_instances }}'
+          VERIFICATION_SUMMARY=""
+          
+          # Parse JSON array and verify each APIM instance
+          echo "$APIM_INSTANCES" | jq -c '.[]' | while read -r instance; do
+            apim_name=$(echo "$instance" | jq -r '.apim_service_name')
+            rg_name=$(echo "$instance" | jq -r '.resource_group')
+            
+            echo ""
+            echo "Verifying API import in APIM service '$apim_name'..."
+            
+            # Get API details to verify import
+            api_info=$(az apim api show \
+              --service-name "$apim_name" \
+              --resource-group "$rg_name" \
+              --api-id "${{ steps.parse_config.outputs.api_id }}" \
+              --output json)
+            
+            api_name=$(echo "$api_info" | jq -r '.displayName')
+            api_path=$(echo "$api_info" | jq -r '.path')
+            service_url=$(echo "$api_info" | jq -r '.serviceUrl')
+            
+            echo "✓ API verified in '$apim_name':"
+            echo "  - Name: $api_name"
+            echo "  - Path: $api_path"
+            echo "  - Service URL: $service_url"
+          done
+          
+          echo ""
+          echo "All API imports verified successfully"
+
+      - name: Create Import Summary
+        uses: actions/github-script@v7
+        if: always()
+        id: summary
+        with:
+          github-token: ${{ steps.generate_token.outputs.token }}
+          result-encoding: string
+          script: |
+            const apimInstances = JSON.parse('${{ steps.parse_config.outputs.apim_instances }}');
+            const apimCount = '${{ steps.parse_config.outputs.apim_count }}';
+            
+            // Build APIM instances table
+            let apimTable = '| APIM Service Name | Resource Group | Status |\n';
+            apimTable += '|-------------------|----------------|--------|\n';
+            
+            apimInstances.forEach(instance => {
+              const status = '${{ steps.import_api.outcome }}' === 'success' ? '✅ Imported' : '❌ Failed';
+              apimTable += `| \`${instance.apim_service_name}\` | \`${instance.resource_group}\` | ${status} |\n`;
+            });
+            
+            const output = `## Azure API Management Import Summary
+            
+            ### API Information
+            - **API ID**: \`${{ steps.parse_config.outputs.api_id }}\`
+            - **API Name**: \`${{ steps.parse_config.outputs.api_name }}\`
+            - **Environment**: \`${{ inputs.environment }}\`
+            - **APIM Instances Count**: \`${apimCount}\`
+            - **Config File**: \`${{ steps.set_config_path.outputs.config_file_path }}\`
+            
+            ### APIM Instances
+            ${apimTable}
+            
+            ### Import Results
+            - **Configuration Parsing**: \`${{ steps.parse_config.outcome }}\`
+            - **APIM Validation**: \`${{ steps.validate_apim.outcome }}\`
+            - **Specification Download**: \`${{ steps.download_spec.outcome }}\`
+            - **Specification Validation**: \`${{ steps.validate_spec.outcome }}\`
+            - **API Import**: \`${{ steps.import_api.outcome }}\`
+            - **Import Verification**: \`${{ steps.verify_import.outcome }}\`
+            
+            ### API Configuration
+            - **Path**: \`${{ steps.parse_config.outputs.api_path }}\`
+            - **Service URL**: \`${{ steps.parse_config.outputs.service_url }}\`
+            - **Version**: \`${{ steps.parse_config.outputs.api_version }}\`
+            - **Specification Format**: \`${{ steps.parse_config.outputs.specification_format }}\`
+            - **Specification URL**: \`${{ steps.parse_config.outputs.specification_url }}\`
+            
+            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Workflow: \`${{ github.workflow }}\`*`;
+
+            core.setOutput('summary', output);
+            return output;
+
+      - name: Save Step Summary
+        if: always()
+        run: echo '${{ steps.summary.outputs.result }}' >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,37 @@
+name: Build Orchestration
+
+on:
+  workflow_call:
+
+jobs:
+  build-and-test:
+    uses: ./.github/workflows/npm_build_and_test.yaml
+    secrets: inherit
+    with:
+      upload_build: "true"
+
+  sonarqube:
+    needs: [build-and-test]
+    uses: ./.github/workflows/common_sonarqube.yaml
+    secrets: inherit
+
+  package:
+    uses: ./.github/workflows/npm_package.yaml
+    needs: [build-and-test]
+    secrets: inherit
+
+  notify_user_on_failure:
+    needs: [package]
+    if: failure()
+    uses: ./.github/workflows/common_send_notification.yaml
+    with:
+      message: "Build failed for repository ${{ github.repository }}"
+    secrets: inherit
+
+  notify_user_on_success:
+    needs: [package]
+    if: success()
+    uses: ./.github/workflows/common_send_notification.yaml
+    with:
+      message: "Build passed for repository ${{ github.repository }}"
+    secrets: inherit

@@ -1,0 +1,19 @@
+on:
+  repository_dispatch:
+    types:
+      - event-triggered-by-jira
+
+jobs:
+  create_repo:
+    runs-on: ubuntu-latest
+    permissions: write-all
+    steps:
+      - id: generate_token
+        uses: jetblueairways/jb-gha-create-github-app-token@v1.5.1
+        with:
+          app-id: 418089
+          private-key: ${{ secrets.JB_REPO_CREATOR_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+      - run: gh repo create jetblueairways/${{ github.event.client_payload.repo_name }} --template jetblueairways/foundations-repo-template --internal
+        env:
+          GH_TOKEN: ${{ steps.generate_token.outputs.token }}

@@ -1,0 +1,57 @@
+name: lib-sonar-scan
+on:
+  workflow_call:
+    inputs:
+      libraryname:
+        required: true
+        type: string
+        description: This takes the each library name to run sonar coverage
+jobs:
+  sonar-scan:
+    runs-on: [dind-runner-set]
+    steps:
+      - name: checkout code
+        uses: jetblueairways/foundation-gh-action-checkout@v3.2.0
+        with:
+          fetch-depth: 0
+
+      - name: Download code coverage results
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.repository.name }}-code-coverage-report-${{ github.sha }}
+          path: coverage
+
+      - name: Copying the coverage folder to project root
+        run: |
+          mkdir -p libs/${{ inputs.libraryname }}/coverage && cp -r coverage/libs/${{ inputs.libraryname }}/* libs/${{ inputs.libraryname }}/coverage
+
+      - name: replace relative paths in lcov file with absolute paths
+        run: |
+          sed -i -e 's,libs/${{ inputs.libraryname }},${{ github.workspace }}/libs/${{ inputs.libraryname }},g' libs/${{ inputs.libraryname }}/coverage/lcov.info
+
+      - name: run sonarqube scan
+        uses: jetblueairways/foundation-sonarqube-scan-action@v4.2.1
+        env:
+          SONAR_TOKEN: ${{ secrets.JB_SONARQUBE_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.JB_SONARQUBE_URL }}
+        with:
+           projectBaseDir: libs/${{ inputs.libraryname }}
+           args: >
+             -Dsonar.branch.name=${{ github.ref_name }}
+             -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+
+      - name: changing project from default to foundation quality gate
+        run: curl -u '${{ secrets.JB_SONARQUBE_TOKEN }}:' -X POST "${{ vars.JB_SONARQUBE_URL }}/api/qualitygates/select?gateName=Foundation&projectKey=${{ inputs.libraryname }}"
+
+      - name: changing project from default to foundation quality profile
+        run: curl -u '${{ secrets.JB_SONARQUBE_TOKEN }}:' -X POST "${{ vars.JB_SONARQUBE_URL }}/api/qualityprofiles/add_project?language=ts&project=${{ inputs.libraryname }}&qualityProfile=Foundation"
+
+      - name: sonarqube quality gate check
+        id: sonarqube-quality-gate-check
+        uses: jetblueairways/foundation-sonarqube-quality-gate-action@v1.1.0
+        timeout-minutes: 2
+        env:
+          SONAR_TOKEN: ${{ secrets.JB_SONARQUBE_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.JB_SONARQUBE_URL }}
+        with:
+          scanMetadataReportFile: libs/${{ inputs.libraryname }}/.scannerwork/report-task.txt

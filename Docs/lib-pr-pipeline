@@ -1,0 +1,91 @@
+name: lib-pr-pipeline
+
+on:
+  workflow_call:
+
+jobs:
+  build:
+    outputs:
+      libarray: ${{steps.extracting-libnames.outputs.libraries}}
+    runs-on: [dind-runner-set]
+    steps:
+      - name: checkout code
+        uses: jetblueairways/foundation-gh-action-checkout@v3.2.0
+        with:
+          fetch-depth: 0
+
+      - name: setup node environment
+        uses: jetblueairways/foundation-gh-action-setup-node@v3.4.1
+        with:
+          node-version: 20.14.0
+          cache: npm
+
+      - name: Set npm config to JetBlue private repos
+        run: |
+          npm config set registry https://${{ vars.JB_ARTIFACTORY_URL }}/artifactory/api/npm/nodejs-virtual
+          npm config set @cb-libraries:registry https://${{ vars.JB_ARTIFACTORY_URL }}/artifactory/api/npm/cb-libraries
+          auth=$(echo -n '${{ secrets.JB_ARTIFACTORY_USER }}:${{ secrets.JB_ARTIFACTORY_SECRET }}' | base64)
+          npm config set //${{ vars.jB_ARTIFACTORY_URL }}/artifactory/api/npm/:_auth=$auth
+
+      - name: install dependencies
+        run: |
+          npm ci
+          rm ${HOME}/.npmrc
+
+      - name: check for lint errors
+        run: npm run lint:pr
+
+      - name: build application
+        run: npm run build:pr
+
+      - name: Run unit tests for applications with coverage
+        run: npm run test:cov:pr
+
+      - name: Upload code coverage results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.repository.name }}-code-coverage-report-${{ github.sha }}
+          path: coverage
+          retention-days: 7
+
+      - name: Get the library names
+        id: library-names
+        uses: jetblueairways/foundation-tj-changed-files-action@v39.2.0
+        with:
+          dir_names: "true"
+          dir_names_max_depth: 2
+          dir_names_exclude_current_dir: true
+          files_ignore: |
+            .github/**
+            libs/cb-test-lib/**
+            .jfrog/**
+            tools/**
+            sample-project/**
+
+      - name: List all changed dir names with directory names
+        if: ${{ steps.library-names.outputs.all_modified_files !='' }}
+        run: |
+          echo '${{ steps.library-names.outputs.all_modified_files }}' | tr " " "\n" >directories.txt
+
+      - name: Extracting the directory names
+        if: ${{ steps.library-names.outputs.all_modified_files !='' }}
+        id: extracting-libnames
+        run: |
+          #!/usr/bin/bash
+          libs=()
+          while IFS= read -r val; do
+             libs+=(\""$(basename $val)"\")
+          done<directories.txt
+          echo libraries=$(IFS=,; printf '[%s]' "${libs[*]}") >> $GITHUB_OUTPUT
+
+  sonar-scan:
+    needs: [build]
+    if: ${{needs.build.outputs.libarray !=''}}
+    uses: ./.github/workflows/lib-sonar-scan.yml
+    with:
+      libraryname: ${{ matrix.libnames }}
+    secrets: inherit
+    strategy:
+      matrix:
+        libnames: ${{fromJSON(needs.build.outputs.libarray)}}
+      max-parallel: 2

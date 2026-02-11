@@ -1,0 +1,147 @@
+name: Apply Infrastructure
+run-name: Apply ${{ inputs.environment }} Infrastructure
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        description: "Environment to deploy to"
+        default: "non_production"
+      runs_on:
+        type: string
+        description: The runner group label to use for the actions
+        default: "arc-runner-set"
+      working_directory:
+        type: string
+        description: "The directory where infrastructure code resides"
+        default: "./"
+      use_oidc:
+        type: string
+        description: "Use the OIDC provider to authenticate the provisioning process"
+        default: "false"
+      tf_log:
+        type: string
+        description: The log level you want terraform to run with
+        default: "ERROR"
+    secrets:
+      JB_ACTIONS_PRIVATE_KEY:
+        description: "The private key for the GitHub App"
+        required: true
+      AZURE_CLIENT_ID:
+        description: "The client ID for the Azure service principal"
+        required: true
+      AZURE_SUBSCRIPTION_ID:
+        description: "The subscription ID for the Azure service principal"
+        required: true
+      AZURE_TENANT_ID:
+        description: "The tenant ID for the Azure service principal"
+        required: true
+
+permissions:
+  id-token: write
+  actions: read
+  contents: read
+
+jobs:
+  apply:
+    name: OpenTofu apply
+    runs-on: ${{ inputs.runs_on }}
+    environment: ${{ inputs.environment }}
+    env:
+      TF_LOG: ${{ inputs.tf_log }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: "16"
+
+      - name: Generate token
+        uses: actions/create-github-app-token@v1
+        id: generate_token
+        with:
+          app-id: ${{ vars.JB_ACTIONS_APP_ID }}
+          private-key: ${{ secrets.JB_ACTIONS_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repository: ${{ github.event.repository.name }}
+
+      - name: Log in to Azure using OIDC
+        if: ${{ inputs.use_oidc == 'true' }}
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: configure git
+        run: |
+          git config --global url."https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/".insteadOf git@github.com:
+          git config --global url."https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/".insteadOf ssh://git@github.com/
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
+
+      - name: OpenTofu Init
+        id: init
+        run: tofu init -input=false -backend-config="environments/${{ inputs.environment }}/backend.hcl"
+        env:
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_USE_OIDC: ${{ inputs.use_oidc}}
+          ARM_USE_MSI: ${{ inputs.use_oidc == 'true' && 'false' || 'true' }}
+
+      - name: Download the plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tf-plan
+          github-token: ${{ steps.generate_token.outputs.token }}
+          path: ${{ inputs.working_directory }}
+
+      - name: Apply the plan
+        id: apply
+        run: tofu apply -input=false -no-color -auto-approve out.tfplan
+        env:
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_USE_OIDC: ${{ inputs.use_oidc}}
+          ARM_USE_MSI: ${{ inputs.use_oidc == 'true' && 'false' || 'true' }}
+
+      - name: Create the apply summary
+        uses: actions/github-script@v7
+        if: always()
+        id: summary
+        env:
+          APPLY: "${{ steps.apply.outputs.stdout }}"
+        with:
+          github-token: ${{ steps.generate_token.outputs.token }}
+          script: |
+            // 1. Prep the output
+            const output = `#### OpenTofu Apply 🚗\`${{ steps.apply.outcome }}\`
+
+            <details><summary>Show details</summary>
+
+            \`\`\`\n
+            ${process.env.APPLY}
+            \`\`\`
+
+            </details>
+
+            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Working Directory: \`${{ inputs.working_directory }}\`, Workflow: \`${{ github.workflow }}\`*`;
+
+            // 2. Set the output variable
+            const fs = require('fs');
+            fs.writeFileSync('${{ inputs.working_directory }}/summary.md', output);
+            core.setOutput('summary', output);
+
+      - name: Write the step summary
+        if: always()
+        run: cat summary.md >> $GITHUB_STEP_SUMMARY

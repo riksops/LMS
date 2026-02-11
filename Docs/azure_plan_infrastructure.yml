@@ -1,0 +1,201 @@
+name: Plan Infrastructure
+run-name: Plan ${{ inputs.environment }} Infrastructure
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        description: "Environment to deploy to"
+        default: "non_production"
+      runs_on:
+        type: string
+        description: The runner group label to use for the actions
+        default: "arc-runner-set"
+      working_directory:
+        type: string
+        description: "The directory where infrastructure code resides"
+        default: "./"
+      use_oidc:
+        type: string
+        description: "Use the OIDC provider to authenticate the provisioning process"
+        default: "false"
+      tf_log:
+        type: string
+        description: The log level you want terraform to run with
+        default: "ERROR"
+    secrets:
+      FLUX_SECRET:
+        description: "The private key for the flux git repository"
+        required: false
+      JB_ACTIONS_PRIVATE_KEY:
+        description: "The private key for the GitHub App"
+        required: true
+      AZURE_CLIENT_ID:
+        description: "The client ID for the Azure service principal"
+        required: true
+      AZURE_SUBSCRIPTION_ID:
+        description: "The subscription ID for the Azure service principal"
+        required: true
+      AZURE_TENANT_ID:
+        description: "The tenant ID for the Azure service principal"
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  plan:
+    name: OpenTofu plan
+    runs-on: ${{ inputs.runs_on }}
+    environment: ${{ inputs.environment }}
+    env:
+      TF_LOG: ${{ inputs.tf_log }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: "16"
+
+      - name: Generate token
+        uses: actions/create-github-app-token@v2
+        id: generate_token
+        with:
+          app-id: ${{ vars.JB_ACTIONS_APP_ID }}
+          private-key: ${{ secrets.JB_ACTIONS_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+
+      - name: Log in to Azure using OIDC
+        uses: azure/login@v1
+        if: ${{ inputs.use_oidc == 'true' }}
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Configure git for GitHub with token (SSH + HTTPS)
+        env:
+          TOKEN: ${{ steps.generate_token.outputs.token || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0
+
+          # Rewrite SSH scp-style and ssh:// to HTTPS-with-token
+          git config --global --add url."https://x-access-token:${TOKEN}@github.com/".insteadOf git@github.com:
+          git config --global --add url."https://x-access-token:${TOKEN}@github.com/".insteadOf ssh://git@github.com/
+
+          # Also rewrite plain https to https-with-token (catches submodules / nested modules)
+          git config --global --add url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+          git config --global --add url."https://x-access-token:${TOKEN}@www.github.com/".insteadOf "https://www.github.com/"
+
+          # Sanity check
+          git config --global --get-regexp '^url\.'
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
+
+      - name: OpenTofu fmt
+        id: fmt
+        run: tofu fmt -check
+        continue-on-error: true
+
+      - name: OpenTofu Init
+        id: init
+        run: tofu init -input=false -backend-config="environments/${{ inputs.environment }}/backend.hcl"
+        env:
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_USE_OIDC: ${{ inputs.use_oidc }}
+          ARM_USE_MSI: ${{ inputs.use_oidc == 'true' && 'false' || 'true' }}
+
+      - name: OpenTofu Validate
+        id: validate
+        run: tofu validate -no-color
+
+      - name: OpenTofu Plan
+        id: plan
+        run: tofu plan -input=false -no-color --out=out.tfplan -var-file="environments/${{ inputs.environment }}/inputs.tfvars"
+        env:
+          TF_VAR_flux_repo_private_key: ${{ secrets.FLUX_SECRET }}
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_USE_OIDC: ${{ inputs.use_oidc}}
+          ARM_USE_MSI: ${{ inputs.use_oidc == 'true' && 'false' || 'true' }}
+
+      - name: Create the plan summary
+        uses: actions/github-script@v7
+        if: always()
+        id: summary
+        env:
+          PLAN: "${{ steps.plan.outputs.stdout }}"
+          VALIDATE: "${{ steps.validate.outputs.stdout }}"
+        with:
+          github-token: ${{ steps.generate_token.outputs.token }}
+          result-encoding: string
+          script: |
+            // 1. Prep the output
+            const output = `#### OpenTofu Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+            #### OpenTofu Initialization ⚙️\`${{ steps.init.outcome }}\`
+            #### OpenTofu Validation 🤖\`${{ steps.validate.outcome }}\`
+            <details><summary>Validation Output</summary>
+
+            \`\`\`\n
+            ${process.env.VALIDATE}
+            \`\`\`
+
+            </details>
+
+            #### OpenTofu Plan 📖\`${{ steps.plan.outcome }}\`
+
+            <details><summary>Show Plan</summary>
+
+            \`\`\`\n
+            ${process.env.PLAN}
+            \`\`\`
+
+            </details>
+
+            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Working Directory: \`${{ inputs.working_directory }}\`, Workflow: \`${{ github.workflow }}\`*`;
+
+            // 2. Set the output variable
+            const fs = require('fs');
+            fs.writeFileSync('${{ inputs.working_directory }}/summary.md', output);
+            core.setOutput('summary', output);
+            return output;
+
+      - name: save the step summary
+        if: always()
+        run: cat summary.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Comment if Pull request
+        if: github.event_name == 'pull_request'
+        env:
+          PLAN_OUTPUT: ${{ steps.summary.outputs.result }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.generate_token.outputs.token }}
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: process.env.PLAN_OUTPUT
+            })
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tf-plan
+          github-token: ${{ steps.generate_token.outputs.token }}
+          path: ${{ inputs.working_directory }}/out.tfplan

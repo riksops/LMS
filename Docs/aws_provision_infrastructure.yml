@@ -1,0 +1,66 @@
+name: Provision AWS infrastructure
+run-name: Provision ${{ inputs.environment }} Infrastructure
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        description: "Environment to deploy to"
+        default: "dev"
+      runs_on:
+        type: string
+        description: The runner group label to use for the actions
+        default: "arc-runner-set"
+      working_directory:
+        type: string
+        description: "The directory where infrastructure code resides"
+        default: "./"
+      use_oidc:
+        type: string
+        description: "Use the OIDC provider to authenticate the provisioning process"
+        default: "false"
+      environments_config_dir:
+        type: string
+        description: "Provide environment folder path"
+        default: "./environments"
+      aws_region:
+        type: string
+        description: "If using AWS, the region to target. Defaults to us-east-1."
+        default: "us-east-1"
+      tf_log:
+        type: string
+        description: The log level you want terraform to run with
+        default: "ERROR"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  plan:
+    name: OpenTofu Plan
+    uses: ./.github/workflows/aws_plan_infrastructure.yaml
+    with:
+      environment: ${{ inputs.environment }}
+      working_directory: ${{ inputs.working_directory }}
+      use_oidc: ${{ inputs.use_oidc }}
+      environments_config_dir: ${{ inputs.environments_config_dir }}
+      runs_on: ${{ inputs.runs_on }}
+      aws_region: ${{ inputs.aws_region }}
+      tf_log: ${{ inputs.tf_log }}
+    secrets: inherit
+
+  aws_apply:
+    name: OpenTofu Apply
+    uses: ./.github/workflows/aws_apply_infrastructure.yaml
+    needs: [plan]
+    with:
+      environment: ${{ inputs.environment }}
+      working_directory: ${{ inputs.working_directory }}
+      use_oidc: ${{ inputs.use_oidc }}
+      environments_config_dir: ${{ inputs.environments_config_dir }}
+      runs_on: ${{ inputs.runs_on }}
+      aws_region: ${{ inputs.aws_region }}
+      tf_log: ${{ inputs.tf_log }}
+    secrets: inherit

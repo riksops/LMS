@@ -1,0 +1,63 @@
+name: Provision Azure infrastructure
+run-name: Provision ${{ inputs.environment }} Infrastructure
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        description: "Environment to deploy to"
+        default: "non_production"
+      runs_on:
+        type: string
+        description: The runner group label to use for the actions
+        default: "arc-runner-set"
+      working_directory:
+        type: string
+        description: "The directory where infrastructure code resides"
+        default: "./"
+      use_oidc:
+        type: string
+        description: "Use the OIDC provider to authenticate the provisioning process"
+        default: "false"
+      tf_log:
+        type: string
+        description: The log level you want terraform to run with
+        default: "ERROR"
+    secrets:
+      JB_ACTIONS_PRIVATE_KEY:
+        required: true
+      AZURE_CLIENT_ID:
+        required: true
+      AZURE_SUBSCRIPTION_ID:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  plan:
+    name: OpenTofu Plan
+    uses: ./.github/workflows/azure_plan_infrastructure.yaml
+    with:
+      environment: ${{ inputs.environment }}
+      runs_on: ${{ inputs.runs_on }}
+      working_directory: ${{ inputs.working_directory }}
+      use_oidc: ${{ inputs.use_oidc }}
+      tf_log: ${{ inputs.tf_log }}
+    secrets: inherit
+
+  apply:
+    name: OpenTofu Apply
+    uses: ./.github/workflows/azure_apply_infrastructure.yaml
+    needs: [plan]
+    with:
+      environment: ${{ inputs.environment }}
+      runs_on: ${{ inputs.runs_on }}
+      working_directory: ${{ inputs.working_directory }}
+      use_oidc: ${{ inputs.use_oidc }}
+      tf_log: ${{ inputs.tf_log }}
+    secrets: inherit

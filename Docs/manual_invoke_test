@@ -1,0 +1,16 @@
+name: Test Workflow Call
+on:
+  workflow_dispatch:  # Allows manual triggering
+
+jobs:
+  call-workflow:
+    uses: ./.github/workflows/grafana_annotate.yaml
+    with:
+      service_name: "cb-example"
+      version: "1.0.4"
+      product: "Crystal"
+      environment: "staging"
+      target: "ACTIVE"
+      region: "us-east-2"
+    secrets:
+      GRAFANA_API_TOKEN: ${{ secrets.GRAFANA_API_TOKEN }}

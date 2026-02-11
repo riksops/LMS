@@ -1,0 +1,331 @@
+name: deployment-config
+on:
+  workflow_call:
+    inputs:
+      app_code:
+        type: string
+        description: "The shorthand code for your application."
+        required: true
+      app_version:
+        type: string
+        description: "The version of the Docker image to be deployed"
+        required: true
+      azure_client_id:
+        type: string
+        description: "The Managed Identity client ID used for OIDC. Must be set if secret AZURE_CLIENT_ID is not set."
+      azure_subscription_id:
+        type: string
+        description: "The subscription ID to target for deployment. Must be set if secret AZURE_SUBSCRIPTION_ID is not set."
+      azure_tenant_id:
+        type: string
+        description: "The Azure tenant to target deployment. Must be set if secret AZURE_TENANT_ID is not set."
+        default: "d9217073-9527-487c-9687-b6bbd93ed621"
+      environment:
+        type: string
+        description: "The environment to be deployed to"
+        default: "non_production"
+      namespace:
+        type: string
+        description: "The namespace the application is deployed to"
+      target:
+        type: string
+        description: "The release target. This is used to generate different named applications in the same cluster"
+        default: head
+      region:
+        type: string
+        description: "The region the application is deployed to"
+        required: true
+      output_file:
+        type: string
+        description: "The file name that the values are written to."
+        default: "values.yaml"
+      slack_channel_id:
+        type: string
+        description: "Slack Channel ID to send notifications"
+        default: "C06JJS5LC6L"
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  start-notification:
+    runs-on: [arc-runner-set]
+    outputs:
+      start_time: ${{ steps.set-time.outputs.start_time }}
+      ts: ${{ steps.slack-notification.outputs.ts }}
+    steps:
+      - name: Set start time
+        id: set-time
+        run: echo "start_time=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: Send deployment start notification
+        id: slack-notification
+        uses: slackapi/slack-github-action@v2.1.1
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.JB_RN_SLACK_BOT_TOKEN }}
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.JB_RN_SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "${{ inputs.slack_channel_id }}",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": ":rocket:  Deployment of ${{ github.event.repository.name }} started  :rocket:"
+                  }
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    {
+                      "text": ":airplane: Release Notifications | Executed by ${{ github.actor }}",
+                      "type": "mrkdwn"
+                    }
+                  ]
+                },
+                {
+                  "type": "divider"
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Repo:* <${{ github.server_url }}/${{ github.repository }}>"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Action:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|${{ github.run_id }}>"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Status:* :hourglass_flowing_sand: Deployment in progress..."
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Environment:* ${{ inputs.environment }} (${{ inputs.region }})"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Version:* ${{ inputs.app_version }}"
+                    }
+                  ]
+                }
+              ]
+            }
+
+  deployment-configuration:
+    needs: [start-notification]
+    environment: ${{ inputs.environment }}
+    runs-on: [dind-runner-set]
+    env:
+      AZURE_CLIENT_ID: ${{ inputs.azure_client_id || secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ inputs.azure_tenant_id || secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ inputs.azure_subscription_id || secrets.AZURE_SUBSCRIPTION_ID }}
+    outputs:
+      deployment_status: ${{ steps.deployment-result.outputs.status }}
+    steps:
+      - name: checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Login to Jfrog Artifactory
+        uses: docker/login-action@v3
+        with:
+          registry: artifactory.it.jetblue.com
+          username: ${{ secrets.JB_ARTIFACTORY_USER }}
+          password: ${{ secrets.JB_ARTIFACTORY_SECRET }}
+
+      - name: Check if Docker image exists in Artifactory
+        id: check_image
+        run: |
+          # Construct the image path (adjust according to your Artifactory structure)
+          IMAGE="${{ vars.JB_ARTIFACTORY_URL }}/${{ vars.JB_DOCKER_REPO_NAME }}/${{ github.event.repository.name }}:${{ inputs.app_version }}"
+          echo "Checking if Docker image exists: $IMAGE"
+
+          # Try to pull the image to verify it exists
+          if ! docker manifest inspect $IMAGE; then
+            echo "::error::Docker image $IMAGE does not exist in Artifactory"
+            echo "## :x: Deployment Failed - Image Not Found" >> $GITHUB_STEP_SUMMARY
+            echo "The Docker image \`$IMAGE\` was not found in Artifactory." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Troubleshooting:" >> $GITHUB_STEP_SUMMARY
+            echo "- Verify the image was built and pushed correctly" >> $GITHUB_STEP_SUMMARY
+            echo "- Check that the tag (${{ inputs.app_version }}) is correct" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          else
+            echo "Docker image $IMAGE found in Artifactory"
+            echo "## :white_check_mark: Image Verification Successful" >> $GITHUB_STEP_SUMMARY
+            echo "Docker image \`$IMAGE\` exists and is ready for deployment." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Generate token
+        uses: actions/create-github-app-token@v1
+        id: generate_token
+        with:
+          app-id: 965107
+          private-key: ${{ secrets.JB_ACTIONS_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Get Cloud config
+        id: generate_cloud_config
+        uses: jetblueairways/cloud-auth-action@main
+        continue-on-error: false
+        with:
+          environment: ${{ inputs.environment }}
+          cluster: ${{ inputs.app_code }}
+          namespace: ${{ inputs.namespace }}
+          region: ${{ inputs.region }}
+          github-token: ${{ steps.generate_token.outputs.token }}
+
+      - name: Log in to Azure using OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ inputs.azure_client_id || steps.generate_cloud_config.outputs.az_client_id || secrets.AZURE_CLIENT_ID || env.AZURE_CLIENT_ID }}
+          subscription-id: ${{ inputs.azure_subscription_id || steps.generate_cloud_config.outputs.subscription_id || secrets.AZURE_SUBSCRIPTION_ID || env.AZURE_SUBSCRIPTION_ID}}
+          tenant-id: ${{ inputs.azure_tenant_id || secrets.AZURE_TENANT_ID }}
+
+      - uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ steps.generate_cloud_config.outputs.rg_name }}
+          cluster-name: ${{ steps.generate_cloud_config.outputs.cluster_name }}
+          subscription: ${{ inputs.azure_subscription_id || steps.generate_cloud_config.outputs.subscription_id || secrets.AZURE_SUBSCRIPTION_ID || env.AZURE_SUBSCRIPTION_ID }}
+          admin: "false"
+          use-kubelogin: "true"
+
+      - name: debug kube cluster
+        run: kubectl config get-contexts
+
+      - name: Generate Helm Values
+        id: generate_helm
+        uses: jetblueairways/prepare-helm-deploy-action@main
+        with:
+          app_version: ${{ inputs.app_version }}
+          environment: ${{ inputs.environment }}
+          cluster: ${{ inputs.app_code }}
+          target: ${{ inputs.target }}
+          namespace: ${{ steps.generate_cloud_config.outputs.namespace }}
+          region: ${{ inputs.region }}
+          output_file: ${{ inputs.output_file }}
+          github-token: ${{ steps.generate_token.outputs.token }}
+
+      - name: Fetch helm repo
+        run: |
+          helm repo add jetblueairways \
+          --username "${{ steps.generate_token.outputs.token }}" \
+          --password "${{ steps.generate_token.outputs.token }}" \
+          "https://raw.githubusercontent.com/jetblueairways/iac-helm-charts/gh-pages/"
+
+      - name: Deploy helm chart
+        id: deploy
+        run: helm upgrade --install --atomic --kube-context ${{ steps.generate_cloud_config.outputs.cluster_name }} --namespace ${{ steps.generate_helm.outputs.namespace }} -f ${{ inputs.output_file }} ${{  steps.generate_helm.outputs.release_name }} jetblueairways/crystalblue-microservice
+        
+      - name: Set deployment status
+        id: deployment-result
+        if: always()
+        run: |
+          if [ "${{ steps.deploy.outcome }}" == "success" ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+          fi
+
+  annotation_grafana:
+    needs: [deployment-configuration]
+    if: success()
+    uses: ./.github/workflows/grafana_annotate.yaml
+    with:
+      service_name: '${{ github.event.repository.name }}'
+      version: '${{ inputs.app_version }}'
+      product: '${{ inputs.app_code }}'
+      environment: '${{ inputs.environment }}'
+      target: '${{ inputs.target }}'
+      region: '${{ inputs.region }}'
+    secrets:
+      GRAFANA_API_TOKEN: ${{ secrets.GRAFANA_API_TOKEN }}
+
+  update-notification:
+    needs: [start-notification, deployment-configuration]
+    runs-on: [arc-runner-set]
+    if: always()
+    steps:
+      - name: Calculate deployment duration
+        id: calculate-duration
+        run: |
+          end_time=$(date +%s)
+          start_time=${{ needs.start-notification.outputs.start_time }}
+          duration=$((end_time - start_time))
+          
+          # Format duration as minutes:seconds
+          minutes=$((duration / 60))
+          seconds=$((duration % 60))
+          echo "duration=${minutes}m ${seconds}s" >> $GITHUB_OUTPUT
+
+      - name: Update deployment notification
+        uses: slackapi/slack-github-action@v2.1.1
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.JB_RN_SLACK_BOT_TOKEN }}
+        with:
+          method: chat.update
+          token: ${{ secrets.JB_RN_SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "${{ inputs.slack_channel_id }}",
+              "ts": "${{ needs.start-notification.outputs.ts }}",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "${{ needs.deployment-configuration.outputs.deployment_status == 'success' && ':white_check_mark:  Deployment of' || ':x:  Deployment failed for' }} ${{ github.event.repository.name }}"
+                  }
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    {
+                      "text": ":airplane: Release Notifications | Executed by ${{ github.actor }}",
+                      "type": "mrkdwn"
+                    }
+                  ]
+                },
+                {
+                  "type": "divider"
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Repo:* <${{ github.server_url }}/${{ github.repository }}>"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Action:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|${{ github.run_id }}>"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Status:* ${{ needs.deployment-configuration.outputs.deployment_status == 'success' && ':white_check_mark: Deployment successful' || ':x: Deployment failed' }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Environment:* ${{ inputs.environment }} (${{ inputs.region }})"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Version:* ${{ inputs.app_version }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Duration:* ${{ steps.calculate-duration.outputs.duration }}"
+                    }
+                  ]
+                }
+              ]
+            }
